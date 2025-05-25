@@ -1,0 +1,63 @@
+import boto3
+import requests
+import csv
+import io
+from datetime import datetime, timezone
+
+s3_client = boto3.client('s3')
+BUCKET_NAME = "data-hackathon-smit-umerbahadur"
+S3_PATH_TEMPLATE = "raw/OpenExchangeRates/{year}/{month}/{day}/{hour}{minute}.csv"
+APP_ID = "5df122955ca841508b973a5e2583e611"  # Replace with your App ID
+
+def lambda_handler(event, context):
+    url = f"https://openexchangerates.org/api/latest.json?app_id={APP_ID}"
+
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Extract rates dictionary
+        rates = data.get("rates", {})
+
+        # Create CSV in memory
+        csv_buffer = io.StringIO()
+        writer = csv.writer(csv_buffer)
+
+        # Write header
+        writer.writerow(["timestamp", "currency", "rate"])
+
+        # Write data rows
+        for currency, rate in rates.items():
+            writer.writerow([timestamp, currency, rate])
+
+        # Prepare S3 key
+        now = datetime.now()
+        s3_key = S3_PATH_TEMPLATE.format(
+            year=now.strftime("%Y"),
+            month=now.strftime("%m"),
+            day=now.strftime("%d"),
+            hour=now.strftime("%H"),
+            minute=now.strftime("%M"),
+        )
+
+        # Upload CSV to S3
+        s3_client.put_object(
+            Bucket=BUCKET_NAME,
+            Key=s3_key,
+            Body=csv_buffer.getvalue(),
+            ContentType="text/csv"
+        )
+
+        return {
+            "statusCode": 200,
+            "body": f"Exchange rates CSV saved to s3://{BUCKET_NAME}/{s3_key}"
+        }
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": f"Error fetching or uploading exchange rates: {e}"
+        }
