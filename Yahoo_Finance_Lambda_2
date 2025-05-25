@@ -1,0 +1,93 @@
+import json
+import boto3
+import pandas as pd
+import snowflake.connector
+from io import StringIO
+
+def lambda_handler(event, context):
+    sqs = boto3.client('sqs')
+    s3 = boto3.client('s3')
+
+    queue_url = "https://sqs.ap-southeast-2.amazonaws.com/503561414499/yahooSQS"
+
+    # Receive messages from SQS
+    response = sqs.receive_message(
+        QueueUrl=queue_url,
+        MaxNumberOfMessages=10,
+        WaitTimeSeconds=0
+    )
+
+    if 'Messages' not in response:
+        print("No messages in SQS queue.")
+        return {'statusCode': 200, 'body': "No messages found in SQS."}
+
+    messages = response['Messages']
+
+    # Connect to Snowflake
+    conn = snowflake.connector.connect(
+        user='Hackathon',
+        password='Hackathon123!@',
+        account='STCRYIT-KJ66874',
+        warehouse='COMPUTE_WH',
+        database='FINANCE_DATA',
+        schema='YAHOO_MARKET',
+        role='ACCOUNTADMIN'
+    )
+    cur = conn.cursor()
+
+    for msg in messages:
+        try:
+            sqs_body = json.loads(msg['Body'])
+            sns_message = json.loads(sqs_body['Message'])
+
+            # Check for real S3 event notification
+            if "Records" in sns_message:
+                for record in sns_message["Records"]:
+                    bucket = record['s3']['bucket']['name']
+                    key = record['s3']['object']['key']
+
+                    print(f"Processing file from: {bucket}/{key}")
+
+                    # Fetch the CSV file from S3
+                    obj = s3.get_object(Bucket=bucket, Key=key)
+                    csv_content = obj['Body'].read().decode('utf-8')
+
+                    df = pd.read_csv(StringIO(csv_content))
+
+                    print(f"Inserting {len(df)} rows into Snowflake.")
+
+                    for _, row in df.iterrows():
+                        cur.execute("""
+                            INSERT INTO YAHOO_FINANCE_OHLCV 
+                            (DATETIME, OPEN, HIGH, LOW, CLOSE, VOLUME, DIVIDENDS, STOCK_SPLITS, SYMBOL, SOURCE, INGEST_TIMESTAMP, STATUS)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            row['Datetime'],
+                            row['Open'],
+                            row['High'],
+                            row['Low'],
+                            row['Close'],
+                            row['Volume'],
+                            row['Dividends'],
+                            row['Stock Splits'],
+                            row['symbol'],
+                            row['source'],
+                            row['ingest_timestamp'],
+                            row['status']
+                        ))
+
+                    print("Insert complete.")
+
+            else:
+                print("SNS message doesn't contain 'Records'. Skipping.")
+
+            # Delete the message after processing
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=msg['ReceiptHandle'])
+
+        except Exception as e:
+            print(f"Error processing message: {e}")
+
+    cur.close()
+    conn.close()
+
+    return {'statusCode': 200, 'body': f"Processed {len(messages)} messages."}
